@@ -6,7 +6,16 @@
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        "./mcp-echo-server.ps1"
+        "./mcp-echo.ps1"
+      ]
+    },
+    "echo-windows-2": {
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "./mcp-echo.ps1"
       ]
     }
   }
