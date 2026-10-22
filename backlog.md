@@ -6,12 +6,12 @@ This backlog follows the selected MVP-first approach: establish a secure, runnab
 
 ## Setup
 
-- [ ] **P0 — Establish the Python project environment.** Select and document the supported Python version, create a project-local virtual environment, and add the minimal runtime and development dependencies to a dependency manifest. (Issue #1)
-- [ ] **P0 — Define the application layout.** Create separate modules or packages for configuration, Jira access, report models and processing, rendering, email delivery, scheduling, and the command-line entry point. (Issue #2)
-- [ ] **P0 — Define configuration and secret handling.** Add typed configuration for Jira URL and authentication, project keys/JQL, reporting period and timezone, recipients, email transport, schedule, and status thresholds; load credentials only from environment variables or a secret store. (Issue #3)
-- [ ] **P0 — Add a safe configuration example.** Provide a committed example configuration with placeholders only, validate required settings at startup, and ensure secret files are ignored by version control. (Issue #4)
-- [ ] **P0 — Specify Jira query scope.** Record the initial project or saved-filter/JQL inputs, reporting-period boundaries, relevant statuses, and fields to retrieve; make project/filter selection configurable rather than hard-coded. (Issue #5)
-- [ ] **P1 — Specify business mappings and thresholds.** Define configurable Jira status-to-category mappings, the team's blocked and at-risk rules, the meaning of “due soon,” milestone source fields, and Green/Yellow/Red health thresholds. (Issue #6)
+- [ ] **P0 — Establish the Python project environment (Issue #1).** Select and document the supported Python version, create a project-local virtual environment, and add the minimal runtime and development dependencies to a dependency manifest.
+- [ ] **P0 — Define the application layout (Issue #2).** Create separate modules or packages for configuration, Jira access, report models and processing, rendering, email delivery, scheduling, and the command-line entry point.
+- [ ] **P0 — Define configuration and secret handling (Issue #3).** Add typed configuration for Jira URL and authentication, project keys/JQL, reporting period and timezone, recipients, email transport, schedule, and status thresholds; load credentials only from environment variables or a secret store.
+- [ ] **P0 — Add a safe configuration example (Issue #4).** Provide a committed example configuration with placeholders only, validate required settings at startup, and ensure secret files are ignored by version control.
+- [ ] **P0 — Specify Jira query scope (Issue #5).** Record the initial project or saved-filter/JQL inputs, reporting-period boundaries, relevant statuses, and fields to retrieve; make project/filter selection configurable rather than hard-coded.
+- [ ] **P1 — Specify business mappings and thresholds (Issue #6).** Define configurable Jira status-to-category mappings, the team's blocked and at-risk rules, the meaning of “due soon,” milestone source fields, and Green/Yellow/Red health thresholds.
 
 ## Core Features
 
