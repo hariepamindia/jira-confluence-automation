@@ -6,12 +6,12 @@ This backlog follows the selected MVP-first approach: establish a secure, runnab
 
 ## Setup
 
-- [ ] **P0 — Establish the Python project environment (Issue #1).** Select and document the supported Python version, create a project-local virtual environment, and add the minimal runtime and development dependencies to a dependency manifest.
-- [ ] **P0 — Define the application layout (Issue #2).** Create separate modules or packages for configuration, Jira access, report models and processing, rendering, email delivery, scheduling, and the command-line entry point.
-- [ ] **P0 — Define configuration and secret handling (Issue #3).** Add typed configuration for Jira URL and authentication, project keys/JQL, reporting period and timezone, recipients, email transport, schedule, and status thresholds; load credentials only from environment variables or a secret store.
-- [ ] **P0 — Add a safe configuration example (Issue #4).** Provide a committed example configuration with placeholders only, validate required settings at startup, and ensure secret files are ignored by version control.
-- [ ] **P0 — Specify Jira query scope (Issue #5).** Record the initial project or saved-filter/JQL inputs, reporting-period boundaries, relevant statuses, and fields to retrieve; make project/filter selection configurable rather than hard-coded.
-- [ ] **P1 — Specify business mappings and thresholds (Issue #6).** Define configurable Jira status-to-category mappings, the team's blocked and at-risk rules, the meaning of “due soon,” milestone source fields, and Green/Yellow/Red health thresholds.
+- [ ] **P0 — Establish the Python project environment ([Issue #1](https://github.com/hariepamindia/jira-confluence-automation/issues/1)).** Select and document the supported Python version, create a project-local virtual environment, and add the minimal runtime and development dependencies to a dependency manifest.
+- [ ] **P0 — Define the application layout ([Issue #2](https://github.com/hariepamindia/jira-confluence-automation/issues/2)).** Create separate modules or packages for configuration, Jira access, report models and processing, rendering, email delivery, scheduling, and the command-line entry point.
+- [ ] **P0 — Define configuration and secret handling ([Issue #3](https://github.com/hariepamindia/jira-confluence-automation/issues/3)).** Add typed configuration for Jira URL and authentication, project keys/JQL, reporting period and timezone, recipients, email transport, schedule, and status thresholds; load credentials only from environment variables or a secret store.
+- [ ] **P0 — Add a safe configuration example ([Issue #4](https://github.com/hariepamindia/jira-confluence-automation/issues/4)).** Provide a committed example configuration with placeholders only, validate required settings at startup, and ensure secret files are ignored by version control.
+- [ ] **P0 — Specify Jira query scope ([Issue #5](https://github.com/hariepamindia/jira-confluence-automation/issues/5)).** Record the initial project or saved-filter/JQL inputs, reporting-period boundaries, relevant statuses, and fields to retrieve; make project/filter selection configurable rather than hard-coded.
+- [ ] **P1 — Specify business mappings and thresholds ([Issue #6](https://github.com/hariepamindia/jira-confluence-automation/issues/6)).** Define configurable Jira status-to-category mappings, the team's blocked and at-risk rules, the meaning of “due soon,” milestone source fields, and Green/Yellow/Red health thresholds.
 
 ## Core Features
 
@@ -55,3 +55,14 @@ This backlog follows the selected MVP-first approach: establish a secure, runnab
 - [ ] **P1 — Document email and schedule deployment.** Explain mail transport settings, safe recipient configuration, deployment target, weekly schedule and timezone, and how to disable or rerun delivery.
 - [ ] **P1 — Document operations and troubleshooting.** Describe logs, retry behavior, common Jira/email failures, credential rotation, and recovery steps for a failed weekly run.
 - [ ] **P1 — Provide a sample output.** Include a clearly fictional report demonstrating all required sections without real project data, personal information, or credentials.
+Module 15 - Bulk Processing Decision
+Task: Validate all instruction files
+
+Approach 3 - Script Automation
+
+Reason:
+
+Multiple files need to be processed.
+Consistent results are required.
+Each file is processed independently.
+Avoids context drift.
