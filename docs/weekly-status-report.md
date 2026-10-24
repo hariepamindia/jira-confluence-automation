@@ -52,6 +52,8 @@ The definitions below are the approved report policy. This task validates the co
 
 Jira query scope is configured in `JIRA_JQL`; the application retrieves the matching set and paginates all results. Narrowing the query to only issues updated during the week can omit open work, due items, and older unresolved issues, so include the configured project scope and recently resolved issues. Milestones are limited to fix versions attached to returned issues; no milestone is invented when Jira has no corresponding data.
 
+Jira search requests use the configured JQL and report fields over HTTPS with certificate verification and a bounded request timeout. The adapter follows Jira pagination metadata, validates each page, and deduplicates issues by key. Rate limits, server errors, timeouts, connection failures, and DNS lookup failures receive bounded retries with capped backoff; authentication and other permanent HTTP errors are not retried. Invalid JSON, inconsistent pagination, incomplete pages, or exhausted retries fail the fetch, so collected pages are never returned as a successful partial result.
+
 ## Production deployment assumptions
 
 The approved production target is a Docker deployment with reachable Jira and PostgreSQL, plus a Node.js cron job owned by the Project Administrator. Schedule the report for Monday at 09:00 in `JIRA_PROJECT_TIMEZONE`; recover a missed run on next startup and allow only one active run at a time. The scheduler and persistence integration are separate implementation tasks; this configuration task does not install or start them.
@@ -68,7 +70,7 @@ python -m unittest discover -s tests -v
 
 - **Missing/invalid settings:** the command names required variables and exits without sending.
 - **Jira HTTP 401/403:** check the account email, API token, base URL, and Browse Projects permission. Credentials are not included in application logs.
-- **Jira network or rate-limit errors:** transient failures are retried a bounded number of times (`JIRA_MAX_RETRIES`); persistent failures stop the run.
+- **Jira network or rate-limit errors:** transient failures are retried a bounded number of times (`JIRA_MAX_RETRIES`) with capped backoff; permanent HTTP errors, invalid responses, incomplete pages, and exhausted retries stop the run without returning partial results.
 - **No completed work or missing milestones:** check the configured JQL includes recently resolved issues and issues linked to relevant fix versions.
 - **Email rejected:** verify sender, recipients, SMTP security mode, credentials, and mail-server policy. A rejected message is not reported as delivered.
 - **Rotate credentials:** replace the secret in the deployment environment/secret store and revoke the old Jira token or SMTP credential; do not add secrets to Git.

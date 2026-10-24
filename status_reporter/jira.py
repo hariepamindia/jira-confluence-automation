@@ -1,6 +1,8 @@
 import base64
 import json
 import logging
+import socket
+import ssl
 import time
 from datetime import date, datetime
 from email.utils import parsedate_to_datetime
@@ -154,7 +156,7 @@ def normalize_issue(
 
 
 def _retry_delay(error: HTTPError, attempt: int) -> float:
-    retry_after = error.headers.get("Retry-After")
+    retry_after = error.headers.get("Retry-After") if error.headers else None
     if retry_after:
         try:
             return min(max(float(retry_after), 0.0), 30.0)
@@ -171,6 +173,47 @@ def _retry_delay(error: HTTPError, attempt: int) -> float:
             except (TypeError, ValueError, OverflowError):
                 pass
     return min(2 ** (attempt - 1), 30)
+
+
+def _is_transient_network_error(error: URLError) -> bool:
+    return isinstance(
+        error.reason,
+        (TimeoutError, ConnectionError, socket.timeout, socket.gaierror),
+    )
+
+
+def _validate_search_page(
+    payload: Any, expected_start: int, requested_page_size: int
+) -> tuple[list[Any], int]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("Jira returned an invalid search response.")
+
+    page_issues = payload.get("issues")
+    start_at = payload.get("startAt")
+    max_results = payload.get("maxResults")
+    total = payload.get("total")
+    if (
+        not isinstance(page_issues, list)
+        or isinstance(start_at, bool)
+        or not isinstance(start_at, int)
+        or isinstance(max_results, bool)
+        or not isinstance(max_results, int)
+        or isinstance(total, bool)
+        or not isinstance(total, int)
+    ):
+        raise RuntimeError("Jira returned invalid pagination metadata.")
+    if (
+        start_at != expected_start
+        or max_results <= 0
+        or max_results > requested_page_size
+        or total < 0
+        or len(page_issues) > max_results
+        or start_at + len(page_issues) > total
+    ):
+        raise RuntimeError("Jira returned inconsistent pagination metadata.")
+    if not page_issues and start_at < total:
+        raise RuntimeError("Jira returned an empty page before all results.")
+    return page_issues, total
 
 
 def fetch_issues(settings: Settings) -> list[IssueRecord]:
@@ -191,10 +234,9 @@ def fetch_issues(settings: Settings) -> list[IssueRecord]:
     issues: list[IssueRecord] = []
     seen_keys: set[str] = set()
     start_at = 0
-    total: int | None = None
     endpoint = f"{settings.jira_base_url}/rest/api/3/search"
 
-    while total is None or start_at < total:
+    while True:
         query = urlencode(
             {
                 "jql": settings.jira_jql,
@@ -210,20 +252,30 @@ def fetch_issues(settings: Settings) -> list[IssueRecord]:
                 "Authorization": f"Basic {auth}",
             },
         )
-        payload = None
+        payload: Any = None
         for attempt in range(1, settings.jira_max_retries + 1):
             try:
-                with urlopen(request, timeout=settings.jira_timeout_seconds) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                with urlopen(
+                    request,
+                    timeout=settings.jira_timeout_seconds,
+                    context=ssl.create_default_context(),
+                ) as response:
+                    try:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                        raise RuntimeError(
+                            "Jira returned an invalid JSON search response."
+                        ) from error
                 break
             except HTTPError as error:
-                error.close()
-                retryable = error.code == 429 or 500 <= error.code < 600
+                retryable = error.code in {408, 429} or 500 <= error.code < 600
                 if not retryable or attempt >= settings.jira_max_retries:
+                    error.close()
                     raise RuntimeError(
                         f"Jira request failed with HTTP {error.code}."
                     ) from error
                 delay = _retry_delay(error, attempt)
+                error.close()
                 LOGGER.warning(
                     "Jira returned HTTP %s; retrying attempt %s/%s after %.1f seconds.",
                     error.code,
@@ -233,6 +285,13 @@ def fetch_issues(settings: Settings) -> list[IssueRecord]:
                 )
                 time.sleep(delay)
             except (URLError, TimeoutError) as error:
+                if (
+                    not isinstance(error, TimeoutError)
+                    and not _is_transient_network_error(error)
+                ):
+                    raise RuntimeError(
+                        "Jira request failed due to a non-retryable network or TLS error."
+                    ) from error
                 if attempt >= settings.jira_max_retries:
                     raise RuntimeError(
                         "Jira request failed after transient network errors."
@@ -246,17 +305,9 @@ def fetch_issues(settings: Settings) -> list[IssueRecord]:
                 )
                 time.sleep(delay)
 
-        if not isinstance(payload, dict) or not isinstance(payload.get("issues"), list):
-            raise RuntimeError("Jira returned an invalid search response.")
-        page_issues = payload["issues"]
-        total_value = payload.get("total")
-        if total_value is not None and (
-            isinstance(total_value, bool) or not isinstance(total_value, int)
-        ):
-            raise RuntimeError("Jira returned an invalid result total.")
-        total = total_value if total_value is not None else start_at + len(page_issues)
-        if not page_issues and start_at < total:
-            raise RuntimeError("Jira returned an empty page before all results.")
+        page_issues, total = _validate_search_page(
+            payload, start_at, settings.jira_page_size
+        )
         for raw_issue in page_issues:
             issue = normalize_issue(
                 raw_issue, settings.timezone, settings.jira_story_points_field
@@ -265,6 +316,6 @@ def fetch_issues(settings: Settings) -> list[IssueRecord]:
                 issues.append(issue)
                 seen_keys.add(issue.key)
         start_at += len(page_issues)
-        if not page_issues:
+        if start_at >= total:
             break
     return issues

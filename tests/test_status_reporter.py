@@ -2,6 +2,7 @@ import io
 import json
 import os
 import smtplib
+import ssl
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -9,7 +10,8 @@ from datetime import date
 from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
 
 from status_reporter.cli import main
 from status_reporter.config import ConfigurationError, Settings, load_env_file
@@ -48,6 +50,27 @@ def _smtp_mock():
     client.__enter__.return_value = client
     client.send_message.return_value = {}
     return client
+
+
+def _jira_settings(**overrides):
+    values = {
+        "JIRA_BASE_URL": "https://example.atlassian.net",
+        "JIRA_EMAIL": "bot@example.com",
+        "JIRA_API_TOKEN": "test-secret",
+        "JIRA_PROJECT_KEY": "EXAMPLE",
+        "JIRA_PROJECT_TIMEZONE": "UTC",
+        "JIRA_JQL": "project = EXAMPLE ORDER BY updated DESC",
+        "JIRA_PAGE_SIZE": "2",
+        "JIRA_MAX_RETRIES": "2",
+    }
+    values.update(overrides)
+    return _settings(**values)
+
+
+def _jira_response(payload):
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+    return response
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -290,22 +313,8 @@ class JiraNormalizationTests(unittest.TestCase):
     @patch("status_reporter.jira.time.sleep")
     @patch("status_reporter.jira.urlopen")
     def test_paginates_and_retries_rate_limit(self, urlopen, sleep):
-        settings = _settings(
-            JIRA_BASE_URL="https://example.atlassian.net",
-            JIRA_EMAIL="bot@example.com",
-            JIRA_API_TOKEN="test-secret",
-            JIRA_PROJECT_KEY="EXAMPLE",
-            JIRA_PROJECT_TIMEZONE="UTC",
-            JIRA_JQL="project = EXAMPLE",
-            JIRA_PAGE_SIZE="2",
-            JIRA_MAX_RETRIES="2",
-        )
+        settings = _jira_settings()
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))["issues"]
-
-        def response(payload):
-            mock = MagicMock()
-            mock.__enter__.return_value.read.return_value = json.dumps(payload).encode()
-            return mock
 
         rate_limit = HTTPError(
             "https://example.atlassian.net",
@@ -316,15 +325,184 @@ class JiraNormalizationTests(unittest.TestCase):
         )
         urlopen.side_effect = [
             rate_limit,
-            response({"total": 3, "issues": fixture[:2]}),
-            response({"total": 3, "issues": fixture[2:]}),
+            _jira_response(
+                {"startAt": 0, "maxResults": 2, "total": 3, "issues": fixture[:2]}
+            ),
+            _jira_response(
+                {"startAt": 2, "maxResults": 2, "total": 3, "issues": fixture[2:]}
+            ),
         ]
         issues = fetch_issues(settings)
-        self.assertEqual([issue.key for issue in issues], [
-            "EXAMPLE-101", "EXAMPLE-102", "EXAMPLE-103"
-        ])
+        self.assertEqual(
+            [issue.key for issue in issues],
+            ["EXAMPLE-101", "EXAMPLE-102", "EXAMPLE-103"],
+        )
         self.assertEqual(urlopen.call_count, 3)
         sleep.assert_called_once_with(0.0)
+        for call, expected_start in zip(
+            urlopen.call_args_list, (0, 0, 2), strict=True
+        ):
+            request = call.args[0]
+            parsed_url = urlparse(request.full_url)
+            self.assertEqual(parsed_url.path, "/rest/api/3/search")
+            parameters = parse_qs(parsed_url.query)
+            self.assertEqual(parameters["jql"], [settings.jira_jql])
+            self.assertEqual(parameters["startAt"], [str(expected_start)])
+            self.assertEqual(parameters["maxResults"], ["2"])
+            requested_fields = set(parameters["fields"][0].split(","))
+            self.assertTrue(
+                {
+                    "summary",
+                    "status",
+                    "assignee",
+                    "project",
+                    "duedate",
+                    "created",
+                    "updated",
+                    "resolutiondate",
+                    "labels",
+                    "components",
+                    "fixVersions",
+                }.issubset(requested_fields)
+            )
+            self.assertEqual(request.get_header("Accept"), "application/json")
+            self.assertTrue(
+                request.get_header("Authorization").startswith("Basic ")
+            )
+            self.assertTrue(call.kwargs["context"].check_hostname)
+            self.assertEqual(
+                call.kwargs["context"].verify_mode,
+                ssl.CERT_REQUIRED,
+            )
+
+    @patch("status_reporter.jira.time.sleep")
+    @patch("status_reporter.jira.urlopen")
+    def test_permanent_http_failure_is_not_retried(self, urlopen, sleep):
+        urlopen.side_effect = HTTPError(
+            "https://example.atlassian.net",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b"secret response details"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "HTTP 401") as raised:
+            fetch_issues(_jira_settings())
+        self.assertNotIn("test-secret", str(raised.exception))
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    @patch("status_reporter.jira.time.sleep")
+    @patch("status_reporter.jira.urlopen")
+    def test_retry_exhaustion_fails_without_returning_partial_issues(
+        self, urlopen, sleep
+    ):
+        urlopen.side_effect = [
+            _jira_response(
+                {
+                    "startAt": 0,
+                    "maxResults": 2,
+                    "total": 3,
+                    "issues": json.loads(FIXTURE.read_text(encoding="utf-8"))[
+                        "issues"
+                    ][:2],
+                }
+            ),
+            HTTPError(
+                "https://example.atlassian.net",
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(b""),
+            ),
+            HTTPError(
+                "https://example.atlassian.net",
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(b""),
+            ),
+        ]
+        with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
+            fetch_issues(_jira_settings())
+        self.assertEqual(urlopen.call_count, 3)
+        sleep.assert_called_once_with(1)
+
+    @patch("status_reporter.jira.urlopen")
+    def test_malformed_or_incomplete_pages_fail_closed(self, urlopen):
+        cases = (
+            (
+                {"issues": [], "total": 0},
+                "pagination metadata",
+            ),
+            (
+                {"startAt": 0, "maxResults": 2, "total": 1, "issues": []},
+                "empty page",
+            ),
+            (
+                {
+                    "startAt": 0,
+                    "maxResults": 2,
+                    "total": 1,
+                    "issues": [{}, {}],
+                },
+                "inconsistent pagination",
+            ),
+        )
+        for payload, message in cases:
+            with self.subTest(payload=payload):
+                urlopen.reset_mock()
+                urlopen.return_value = _jira_response(payload)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    fetch_issues(_jira_settings(JIRA_MAX_RETRIES="1"))
+
+    @patch("status_reporter.jira.urlopen")
+    def test_invalid_json_response_fails_visibly(self, urlopen):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b"{not json"
+        urlopen.return_value = response
+        with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+            fetch_issues(_jira_settings(JIRA_MAX_RETRIES="1"))
+
+    @patch("status_reporter.jira.time.sleep")
+    @patch("status_reporter.jira.urlopen")
+    def test_transient_network_failure_retries(self, urlopen, sleep):
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))["issues"][:1]
+        urlopen.side_effect = [
+            URLError(ConnectionError("temporarily unavailable")),
+            _jira_response(
+                {
+                    "startAt": 0,
+                    "maxResults": 2,
+                    "total": 1,
+                    "issues": fixture,
+                }
+            ),
+        ]
+        self.assertEqual(len(fetch_issues(_jira_settings())), 1)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    @patch("status_reporter.jira.urlopen")
+    def test_tls_certificate_failure_is_not_retried(self, urlopen):
+        urlopen.side_effect = URLError(ssl.SSLCertVerificationError("invalid cert"))
+        with self.assertRaisesRegex(RuntimeError, "non-retryable"):
+            fetch_issues(_jira_settings())
+        self.assertEqual(urlopen.call_count, 1)
+
+    @patch("status_reporter.jira.urlopen")
+    def test_duplicate_issue_keys_are_returned_once(self, urlopen):
+        issue = json.loads(FIXTURE.read_text(encoding="utf-8"))["issues"][0]
+        urlopen.return_value = _jira_response(
+            {
+                "startAt": 0,
+                "maxResults": 2,
+                "total": 2,
+                "issues": [issue, issue],
+            }
+        )
+        result = fetch_issues(_jira_settings())
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].key, "EXAMPLE-101")
 
 
 class ReportingTests(unittest.TestCase):
