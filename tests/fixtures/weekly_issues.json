@@ -46,7 +46,7 @@
         "summary": "Resolve deployment dependency",
         "status": {"name": "Blocked"},
         "priority": {"name": "Highest"},
-        "assignee": null,
+        "assignee": {"displayName": "Casey Example"},
         "project": {"key": "EXAMPLE"},
         "duedate": "2026-10-20",
         "created": "2026-10-10T08:00:00.000+0000",

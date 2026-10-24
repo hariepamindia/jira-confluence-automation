@@ -14,9 +14,10 @@ class IssueRecord:
     key: str
     summary: str
     status: str
+    resolution: str | None
     priority: str | None
     assignee: str | None
-    project: str
+    project: str | None
     due_date: date | None
     created_date: datetime | None
     updated_date: datetime | None
@@ -45,6 +46,7 @@ class Report:
     health_reasons: tuple[str, ...]
     total_issues: int
     open_issues: int
+    planned_issues: tuple[IssueRecord, ...]
     completed_issues: tuple[IssueRecord, ...]
     in_progress_issues: tuple[IssueRecord, ...]
     blocked_issues: tuple[IssueRecord, ...]
@@ -54,3 +56,7 @@ class Report:
     milestones: tuple[Milestone, ...]
     updated_in_period: int
     recommendations: tuple[str, ...]
+    active_denominator: int
+    overdue_percent: float
+    detail_issues: tuple[IssueRecord, ...]
+    omitted_detail_count: int

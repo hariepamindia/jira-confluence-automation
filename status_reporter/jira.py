@@ -6,7 +6,7 @@ import ssl
 import time
 from datetime import date, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -19,6 +19,7 @@ LOGGER = logging.getLogger(__name__)
 JIRA_FIELDS = (
     "summary",
     "status",
+    "resolution",
     "priority",
     "assignee",
     "project",
@@ -40,7 +41,7 @@ def _parse_datetime(value: Any, timezone: ZoneInfo) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise ValueError(f"Invalid Jira date/time value: {value!r}.") from error
+        raise ValueError("Invalid Jira date/time value.") from error
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone)
     return parsed.astimezone(timezone)
@@ -52,9 +53,9 @@ def _parse_date(value: Any) -> date | None:
     if not isinstance(value, str):
         raise ValueError("Expected a Jira date string.")
     try:
-        return date.fromisoformat(value[:10])
+        return date.fromisoformat(value)
     except ValueError as error:
-        raise ValueError(f"Invalid Jira date value: {value!r}.") from error
+        raise ValueError("Invalid Jira date value.") from error
 
 
 def normalize_issue(
@@ -72,26 +73,39 @@ def normalize_issue(
     summary = fields.get("summary")
     status_data = fields.get("status")
     project_data = fields.get("project")
-    if not isinstance(summary, str):
+    if not isinstance(summary, str) or not summary.strip():
         raise ValueError(f"Jira issue {key} is missing its summary.")
     if not isinstance(status_data, dict) or not isinstance(
         status_data.get("name"), str
-    ):
+    ) or not status_data["name"].strip():
         raise ValueError(f"Jira issue {key} is missing its status.")
-    if not isinstance(project_data, dict) or not isinstance(
-        project_data.get("key"), str
-    ):
-        raise ValueError(f"Jira issue {key} is missing its project key.")
-    for field_name in ("created", "updated"):
-        if not isinstance(fields.get(field_name), str) or not fields[field_name]:
-            raise ValueError(f"Jira issue {key} is missing its {field_name} date.")
-
     assignee_data = fields.get("assignee")
-    if assignee_data is not None and not isinstance(assignee_data, dict):
-        raise ValueError(f"Jira issue {key} has an invalid assignee.")
+    if (
+        not isinstance(assignee_data, dict)
+        or not isinstance(assignee_data.get("displayName"), str)
+        or not assignee_data["displayName"].strip()
+    ):
+        raise ValueError(f"Jira issue {key} is missing its assignee.")
     priority_data = fields.get("priority")
     if priority_data is not None and not isinstance(priority_data, dict):
         raise ValueError(f"Jira issue {key} has an invalid priority.")
+    if project_data is not None and (
+        not isinstance(project_data, dict)
+        or not isinstance(project_data.get("key"), str)
+    ):
+        raise ValueError(f"Jira issue {key} has an invalid project.")
+    resolution_data = fields.get("resolution")
+    if resolution_data is not None and (
+        not isinstance(resolution_data, dict)
+        or not isinstance(resolution_data.get("name"), str)
+    ):
+        raise ValueError(f"Jira issue {key} has an invalid resolution.")
+    try:
+        due_date = _parse_date(fields.get("duedate"))
+    except ValueError as error:
+        raise ValueError(f"Jira issue {key} has invalid date data: {error}") from error
+    if due_date is None:
+        raise ValueError(f"Jira issue {key} is missing its due date.")
 
     labels = fields.get("labels", [])
     components = fields.get("components", [])
@@ -123,7 +137,6 @@ def normalize_issue(
             )
             for item in versions
         )
-        due_date = _parse_date(fields.get("duedate"))
         created_date = _parse_datetime(fields.get("created"), timezone)
         updated_date = _parse_datetime(fields.get("updated"), timezone)
         resolution_date = _parse_datetime(fields.get("resolutiondate"), timezone)
@@ -141,9 +154,10 @@ def normalize_issue(
         key=key,
         summary=summary,
         status=status_data["name"],
+        resolution=(resolution_data or {}).get("name"),
         priority=(priority_data or {}).get("name"),
         assignee=(assignee_data or {}).get("displayName"),
-        project=project_data["key"],
+        project=(project_data or {}).get("key"),
         due_date=due_date,
         created_date=created_date,
         updated_date=updated_date,
@@ -153,6 +167,40 @@ def normalize_issue(
         story_points=story_points,
         versions=normalized_versions,
     )
+
+
+def normalize_issues(
+    raw_issues: Iterable[Any],
+    timezone: ZoneInfo,
+    story_points_field: str | None,
+) -> list[IssueRecord]:
+    normalized: list[IssueRecord] = []
+    seen_keys: set[str] = set()
+    for raw_issue in raw_issues:
+        key = raw_issue.get("key") if isinstance(raw_issue, dict) else None
+        try:
+            issue = normalize_issue(raw_issue, timezone, story_points_field)
+        except ValueError as error:
+            raw_key = key.strip() if isinstance(key, str) else ""
+            safe_key = "".join(
+                character if character.isprintable() else "?"
+                for character in raw_key[:100]
+            ) or "unknown"
+            reason = str(error).replace(raw_key, safe_key) if raw_key else str(error)
+            reason = "".join(
+                character if character.isprintable() else " "
+                for character in reason[:200]
+            )
+            LOGGER.warning(
+                "Excluding invalid Jira issue %s: %s",
+                safe_key,
+                reason,
+            )
+            continue
+        if issue.key not in seen_keys:
+            normalized.append(issue)
+            seen_keys.add(issue.key)
+    return normalized
 
 
 def _retry_delay(error: HTTPError, attempt: int) -> float:
@@ -308,10 +356,9 @@ def fetch_issues(settings: Settings) -> list[IssueRecord]:
         page_issues, total = _validate_search_page(
             payload, start_at, settings.jira_page_size
         )
-        for raw_issue in page_issues:
-            issue = normalize_issue(
-                raw_issue, settings.timezone, settings.jira_story_points_field
-            )
+        for issue in normalize_issues(
+            page_issues, settings.timezone, settings.jira_story_points_field
+        ):
             if issue.key not in seen_keys:
                 issues.append(issue)
                 seen_keys.add(issue.key)

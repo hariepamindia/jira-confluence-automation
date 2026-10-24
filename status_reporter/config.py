@@ -212,13 +212,7 @@ class Settings:
     blocked_statuses: tuple[str, ...]
     status_mappings: tuple[tuple[str, str], ...]
     status_precedence: tuple[str, ...]
-    blocked_labels: tuple[str, ...]
-    at_risk_labels: tuple[str, ...]
-    at_risk_priorities: tuple[str, ...]
     due_soon_days: int
-    red_blocked_threshold: int
-    red_overdue_threshold: int
-    yellow_risk_threshold: int
     health_green_max_percent: float
     health_yellow_max_percent: float
     report_detail_limit: int
@@ -355,6 +349,11 @@ class Settings:
             raise ConfigurationError(
                 "AUDIT_RETENTION_DAYS must be 90 per the approved audit policy."
             )
+        due_soon_days = _integer(values, "REPORT_DUE_SOON_DAYS", 7, maximum=7)
+        if due_soon_days != 7:
+            raise ConfigurationError(
+                "REPORT_DUE_SOON_DAYS must be 7 per the approved risk policy."
+            )
 
         story_points_field = (
             values.get("JIRA_STORY_POINTS_FIELD", "customfield_10016").strip()
@@ -390,6 +389,21 @@ class Settings:
             raise ConfigurationError(
                 "Use REPORT_STATUS_MAPPINGS instead of legacy status settings: "
                 + ", ".join(sorted(legacy_status_settings))
+                + "."
+            )
+        legacy_metric_settings = {
+            "REPORT_BLOCKED_LABELS",
+            "REPORT_AT_RISK_LABELS",
+            "REPORT_AT_RISK_PRIORITIES",
+            "REPORT_RED_BLOCKED_THRESHOLD",
+            "REPORT_RED_OVERDUE_THRESHOLD",
+            "REPORT_YELLOW_RISK_THRESHOLD",
+        } & values.keys()
+        if legacy_metric_settings:
+            raise ConfigurationError(
+                "Remove legacy metric settings; use the approved status and "
+                "percentage policies: "
+                + ", ".join(sorted(legacy_metric_settings))
                 + "."
             )
 
@@ -430,30 +444,7 @@ class Settings:
             ),
             status_mappings=status_mappings,
             status_precedence=("Blocked", "At Risk", "Active", "Planned", "Completed"),
-            blocked_labels=tuple(
-                label.casefold()
-                for label in _csv(values, "REPORT_BLOCKED_LABELS", "blocked")
-            ),
-            at_risk_labels=tuple(
-                label.casefold()
-                for label in _csv(values, "REPORT_AT_RISK_LABELS", "at-risk,risk")
-            ),
-            at_risk_priorities=tuple(
-                priority.casefold()
-                for priority in _csv(
-                    values, "REPORT_AT_RISK_PRIORITIES", "Highest,High"
-                )
-            ),
-            due_soon_days=_integer(values, "REPORT_DUE_SOON_DAYS", 7),
-            red_blocked_threshold=_integer(
-                values, "REPORT_RED_BLOCKED_THRESHOLD", 1
-            ),
-            red_overdue_threshold=_integer(
-                values, "REPORT_RED_OVERDUE_THRESHOLD", 1
-            ),
-            yellow_risk_threshold=_integer(
-                values, "REPORT_YELLOW_RISK_THRESHOLD", 1
-            ),
+            due_soon_days=due_soon_days,
             health_green_max_percent=green_max,
             health_yellow_max_percent=yellow_max,
             report_detail_limit=_integer(

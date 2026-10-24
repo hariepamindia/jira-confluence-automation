@@ -6,7 +6,8 @@ import ssl
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from datetime import date
+from dataclasses import replace
+from datetime import date, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,8 +16,8 @@ from urllib.parse import parse_qs, urlparse
 
 from status_reporter.cli import main
 from status_reporter.config import ConfigurationError, Settings, load_env_file
-from status_reporter.email_delivery import DeliveryError, send_report
-from status_reporter.jira import fetch_issues, normalize_issue
+from status_reporter.email_delivery import DeliveryError, DeliveryResult, send_report
+from status_reporter.jira import fetch_issues, normalize_issue, normalize_issues
 from status_reporter.reporting import build_report
 from status_reporter.rendering import render_report, render_subject
 
@@ -30,7 +31,6 @@ def _settings(**overrides):
     values = {
         "REPORT_PROJECT_NAME": "Example Project",
         "REPORT_TIMEZONE": "UTC",
-        "REPORT_YELLOW_RISK_THRESHOLD": "2",
     }
     values.update(overrides)
     return Settings.from_env(values, require_jira=False)
@@ -135,6 +135,18 @@ class ConfigurationTests(unittest.TestCase):
                     "REPORT_STATUS_MAPPINGS":
                         "To Do=Active,In Progress=Active,Blocked=Blocked,Done=Completed"
                 },
+                require_jira=False,
+            )
+
+    def test_legacy_metric_rules_are_rejected(self):
+        with self.assertRaisesRegex(ConfigurationError, "legacy metric settings"):
+            Settings.from_env(
+                {"REPORT_RED_OVERDUE_THRESHOLD": "1"},
+                require_jira=False,
+            )
+        with self.assertRaisesRegex(ConfigurationError, "must be 7"):
+            Settings.from_env(
+                {"REPORT_DUE_SOON_DAYS": "6"},
                 require_jira=False,
             )
 
@@ -284,7 +296,7 @@ class JiraNormalizationTests(unittest.TestCase):
     def test_normalizes_optional_values_and_timezone(self):
         issue = _issues()[2]
         self.assertEqual(issue.key, "EXAMPLE-103")
-        self.assertIsNone(issue.assignee)
+        self.assertEqual(issue.assignee, "Casey Example")
         self.assertEqual(issue.updated_date.isoformat(), "2026-10-23T11:00:00+00:00")
         self.assertEqual(issue.due_date, date(2026, 10, 20))
         self.assertIsNone(issue.story_points)
@@ -293,6 +305,58 @@ class JiraNormalizationTests(unittest.TestCase):
         raw = {"key": "EXAMPLE-9", "fields": {"summary": "Missing status"}}
         with self.assertRaisesRegex(ValueError, "EXAMPLE-9"):
             normalize_issue(raw, _settings().timezone, None)
+
+    def test_required_assignee_and_due_date_are_enforced(self):
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))["issues"][0]
+        for field, value in (("assignee", None), ("duedate", None)):
+            invalid = json.loads(json.dumps(raw))
+            invalid["fields"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "EXAMPLE-101"
+            ):
+                normalize_issue(invalid, _settings().timezone, None)
+
+    def test_invalid_issue_records_are_skipped_with_safe_warning(self):
+        raw_issues = json.loads(FIXTURE.read_text(encoding="utf-8"))["issues"]
+        invalid = json.loads(json.dumps(raw_issues[0]))
+        invalid["key"] = "EXAMPLE-999"
+        invalid["fields"]["duedate"] = None
+        warning = io.StringIO()
+        with patch("status_reporter.jira.LOGGER.warning") as log_warning:
+            result = normalize_issues(
+                [invalid, raw_issues[1]], _settings().timezone, None
+            )
+        self.assertEqual([issue.key for issue in result], ["EXAMPLE-102"])
+        log_warning.assert_called_once()
+        self.assertNotIn("Complete account settings page", str(log_warning.call_args))
+
+    @patch("status_reporter.jira.urlopen")
+    @patch("status_reporter.jira.LOGGER.warning")
+    def test_live_fetch_skips_invalid_record_and_continues(
+        self, log_warning, urlopen
+    ):
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))["issues"]
+        invalid = json.loads(json.dumps(fixture[0]))
+        invalid["fields"]["assignee"] = None
+        urlopen.return_value = _jira_response(
+            {
+                "startAt": 0,
+                "maxResults": 2,
+                "total": 2,
+                "issues": [invalid, fixture[1]],
+            }
+        )
+        result = fetch_issues(_jira_settings(JIRA_MAX_RETRIES="1"))
+        self.assertEqual([issue.key for issue in result], ["EXAMPLE-102"])
+        log_warning.assert_called_once()
+
+    def test_created_and_updated_timestamps_can_be_missing(self):
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))["issues"][0]
+        raw["fields"].pop("created")
+        raw["fields"].pop("updated")
+        issue = normalize_issue(raw, _settings().timezone, None)
+        self.assertIsNone(issue.created_date)
+        self.assertIsNone(issue.updated_date)
 
     def test_null_optional_collections_are_normalized_to_empty(self):
         raw = json.loads(FIXTURE.read_text(encoding="utf-8"))["issues"][2]
@@ -360,6 +424,7 @@ class JiraNormalizationTests(unittest.TestCase):
                     "created",
                     "updated",
                     "resolutiondate",
+                    "resolution",
                     "labels",
                     "components",
                     "fixVersions",
@@ -507,7 +572,7 @@ class JiraNormalizationTests(unittest.TestCase):
 
 class ReportingTests(unittest.TestCase):
     def test_builds_metrics_health_and_milestone_progress(self):
-        settings = _settings(REPORT_YELLOW_RISK_THRESHOLD="1")
+        settings = _settings()
         report = build_report(
             _issues(settings),
             settings,
@@ -521,18 +586,16 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(len(report.completed_issues), 1)
         self.assertEqual(len(report.in_progress_issues), 1)
         self.assertEqual(len(report.blocked_issues), 1)
-        self.assertEqual(len(report.at_risk_issues), 2)
+        self.assertEqual(len(report.at_risk_issues), 1)
         self.assertEqual(len(report.overdue_issues), 1)
         self.assertEqual(len(report.due_soon_issues), 1)
         self.assertEqual(report.milestones[0].name, "October Release")
         self.assertEqual(report.milestones[0].completed_issues, 1)
 
-    def test_health_thresholds_can_be_configured(self):
+    def test_health_percentage_thresholds_can_be_configured(self):
         settings = _settings(
-            REPORT_RED_BLOCKED_THRESHOLD="2",
-            REPORT_RED_OVERDUE_THRESHOLD="2",
-            REPORT_YELLOW_RISK_THRESHOLD="3",
-            REPORT_DUE_SOON_DAYS="3",
+            REPORT_HEALTH_GREEN_MAX_PERCENT="50",
+            REPORT_HEALTH_YELLOW_MAX_PERCENT="60",
         )
         report = build_report(
             _issues(settings),
@@ -543,7 +606,7 @@ class ReportingTests(unittest.TestCase):
         )
         self.assertEqual(report.health, "Green")
 
-    def test_empty_scope_is_not_reported_as_green(self):
+    def test_empty_scope_has_zero_active_issues_and_is_green(self):
         report = build_report(
             [],
             _settings(),
@@ -551,8 +614,181 @@ class ReportingTests(unittest.TestCase):
             PERIOD_END,
             today=date(2026, 10, 24),
         )
-        self.assertEqual(report.health, "Yellow")
-        self.assertIn("No Jira issues", report.health_reasons[0])
+        self.assertEqual(report.health, "Green")
+        self.assertEqual(report.active_denominator, 0)
+
+    def test_health_threshold_boundaries_use_active_denominator(self):
+        base = _issues()[0]
+        today = date(2026, 10, 24)
+        for overdue_count, expected in (
+            (10, "Green"),
+            (11, "Yellow"),
+            (20, "Yellow"),
+            (21, "Red"),
+        ):
+            with self.subTest(overdue_count=overdue_count):
+                issues = [
+                    replace(
+                        base,
+                        key=f"EXAMPLE-{index:03}",
+                        status="To Do",
+                        resolution=None,
+                        resolution_date=None,
+                        due_date=(
+                            today - timedelta(days=1)
+                            if index <= overdue_count
+                            else today + timedelta(days=30)
+                        ),
+                    )
+                    for index in range(1, 101)
+                ]
+                report = build_report(
+                    issues,
+                    _settings(),
+                    PERIOD_START,
+                    PERIOD_END,
+                    today=today,
+                )
+                self.assertEqual(report.active_denominator, 100)
+                self.assertEqual(report.health, expected)
+
+    def test_status_precedence_and_due_risk_boundaries(self):
+        base = _issues()[0]
+        today = date(2026, 10, 24)
+        issues = [
+            replace(
+                base, key="EXAMPLE-201", status="In Progress",
+                due_date=today + timedelta(days=7), resolution=None,
+                resolution_date=None,
+            ),
+            replace(
+                base, key="EXAMPLE-202", status="In Progress",
+                due_date=today + timedelta(days=8), resolution=None,
+                resolution_date=None,
+            ),
+            replace(
+                base, key="EXAMPLE-203", status="To Do", labels=("blocked",),
+                due_date=today + timedelta(days=2), resolution=None,
+                resolution_date=None,
+            ),
+            replace(
+                base, key="EXAMPLE-204", status="To Do",
+                due_date=today - timedelta(days=1), resolution=None,
+                resolution_date=None,
+            ),
+        ]
+        report = build_report(
+            issues, _settings(), PERIOD_START, PERIOD_END, today=today
+        )
+        self.assertEqual({issue.key for issue in report.at_risk_issues}, {"EXAMPLE-201", "EXAMPLE-203"})
+        self.assertEqual({issue.key for issue in report.overdue_issues}, {"EXAMPLE-204"})
+        self.assertEqual({issue.key for issue in report.blocked_issues}, {"EXAMPLE-203"})
+        self.assertEqual(
+            {issue.key for issue in report.planned_issues}, {"EXAMPLE-204"}
+        )
+        self.assertEqual(
+            {issue.key for issue in report.in_progress_issues},
+            {"EXAMPLE-201", "EXAMPLE-202"},
+        )
+
+    def test_canceled_and_duplicate_issues_do_not_affect_report(self):
+        base = _issues()[0]
+        issues = [
+            replace(base, key="EXAMPLE-301", status="Cancelled"),
+            replace(base, key="EXAMPLE-302", status="In Progress", resolution="Duplicate"),
+            replace(base, key="EXAMPLE-303", status="To Do"),
+        ]
+        report = build_report(
+            issues, _settings(), PERIOD_START, PERIOD_END, today=date(2026, 10, 24)
+        )
+        self.assertEqual(report.total_issues, 1)
+        self.assertEqual(report.open_issues, 1)
+        self.assertEqual(report.detail_issues[0].key, "EXAMPLE-303")
+
+    def test_reopened_issue_does_not_count_as_completed(self):
+        base = _issues()[0]
+        reopened = replace(base, status="In Progress")
+        completed_again = replace(
+            base,
+            key="EXAMPLE-102",
+            resolution_date=base.resolution_date.replace(day=24),
+        )
+        report = build_report(
+            [reopened, completed_again],
+            _settings(),
+            PERIOD_START,
+            PERIOD_END,
+            today=date(2026, 10, 24),
+        )
+        self.assertEqual([issue.key for issue in report.completed_issues], ["EXAMPLE-102"])
+
+    def test_detail_selection_orders_and_caps_independently_of_metrics(self):
+        base = _issues()[0]
+        today = date(2026, 10, 24)
+        issues = [
+            replace(
+                base,
+                key=f"EXAMPLE-{index:03}",
+                status="To Do",
+                resolution=None,
+                resolution_date=None,
+                priority=("Low" if index == 1 else "High"),
+                due_date=today + timedelta(days=index),
+            )
+            for index in range(1, 103)
+        ]
+        settings = _settings(REPORT_DETAIL_LIMIT="100")
+        report = build_report(
+            issues, settings, PERIOD_START, PERIOD_END, today=today
+        )
+        self.assertEqual(report.total_issues, 102)
+        self.assertEqual(len(report.detail_issues), 100)
+        self.assertEqual(report.detail_issues[0].key, "EXAMPLE-002")
+        self.assertEqual(report.omitted_detail_count, 2)
+
+    def test_detail_tie_breakers_and_rendered_global_cap(self):
+        base = _issues()[0]
+        today = date(2026, 10, 24)
+        issues = [
+            replace(
+                base,
+                key=key,
+                status="To Do",
+                resolution=None,
+                resolution_date=None,
+                priority=priority,
+                due_date=due,
+                created_date=created,
+            )
+            for key, priority, due, created in (
+                ("EXAMPLE-510", "High", today, base.created_date),
+                ("EXAMPLE-509", "High", today, base.created_date),
+                ("EXAMPLE-508", "High", today + timedelta(days=1), base.created_date),
+                ("EXAMPLE-507", "Highest", today + timedelta(days=5), base.created_date),
+            )
+        ]
+        report = build_report(
+            issues, _settings(), PERIOD_START, PERIOD_END, today=today
+        )
+        self.assertEqual(
+            [issue.key for issue in report.detail_issues],
+            ["EXAMPLE-507", "EXAMPLE-509", "EXAMPLE-510", "EXAMPLE-508"],
+        )
+
+        many_issues = [
+            replace(issue, key=f"EXAMPLE-{index:03}")
+            for index, issue in enumerate(issues * 26, start=1)
+        ][:102]
+        capped_report = build_report(
+            many_issues,
+            _settings(),
+            PERIOD_START,
+            PERIOD_END,
+            today=today,
+        )
+        body = render_report(capped_report, 7)
+        self.assertEqual(body.count("EXAMPLE-"), 100)
+        self.assertIn("2 additional issue detail(s) omitted", body)
 
     def test_period_end_before_start_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "cannot precede"):
@@ -590,8 +826,21 @@ class RenderingAndDeliveryTests(unittest.TestCase):
             self.assertIn(section, body)
         self.assertIn("EXAMPLE-101", body)
 
+    def test_render_sanitizes_issue_text_control_characters(self):
+        settings = _settings()
+        issue = replace(
+            _issues(settings)[0],
+            summary="Summary\r\nInjected: header",
+        )
+        report = build_report(
+            [issue], settings, PERIOD_START, PERIOD_END, today=date(2026, 10, 24)
+        )
+        body = render_report(report, settings.due_soon_days)
+        self.assertIn("Summary  Injected: header", body)
+        self.assertNotIn("\r", body)
+
     @patch("status_reporter.email_delivery.smtplib.SMTP")
-    def test_delivery_uses_configured_subject_and_recipients(self, smtp_class):
+    def test_delivery_sends_individually_to_configured_recipients(self, smtp_class):
         settings = _settings(
             SMTP_HOST="smtp.example.com",
             SMTP_SENDER="reports@example.com",
@@ -607,13 +856,69 @@ class RenderingAndDeliveryTests(unittest.TestCase):
         client = _smtp_mock()
         smtp_class.return_value = client
         send_report(report, settings)
-        message = client.send_message.call_args.args[0]
+        self.assertEqual(client.send_message.call_count, 2)
+        message = client.send_message.call_args_list[0].args[0]
         self.assertIsInstance(message, EmailMessage)
-        self.assertEqual(message["To"], "lead@example.com, team@example.com")
+        self.assertEqual(message["To"], "lead@example.com")
         self.assertIn("2026-10-19", message["Subject"])
+        self.assertEqual(
+            client.send_message.call_args_list[0].kwargs["to_addrs"],
+            ["lead@example.com"],
+        )
+        self.assertEqual(
+            client.send_message.call_args_list[1].kwargs["to_addrs"],
+            ["team@example.com"],
+        )
 
     @patch("status_reporter.email_delivery.smtplib.SMTP")
-    def test_delivery_rejection_is_not_reported_as_success(self, smtp_class):
+    def test_partial_delivery_returns_success_with_warnings(self, smtp_class):
+        settings = _settings(
+            SMTP_HOST="smtp.example.com",
+            SMTP_SENDER="reports@example.com",
+            SMTP_RECIPIENTS="lead@example.com,team@example.com",
+        )
+        report = build_report([], settings, PERIOD_START, PERIOD_END)
+        client = _smtp_mock()
+        smtp_class.return_value = client
+        client.send_message.side_effect = [
+            {"lead@example.com": (550, b"rejected")},
+            {},
+        ]
+        result = send_report(report, settings)
+        self.assertEqual(result.outcome, "Success With Warnings")
+        self.assertEqual(result.accepted_count, 1)
+        self.assertEqual(result.failed_count, 1)
+        self.assertEqual(client.send_message.call_count, 2)
+
+    @patch("status_reporter.email_delivery.smtplib.SMTP")
+    def test_smtp_recipients_refused_exception_does_not_stop_remaining(
+        self, smtp_class
+    ):
+        settings = _settings(
+            SMTP_HOST="smtp.example.com",
+            SMTP_SENDER="reports@example.com",
+            SMTP_RECIPIENTS="lead@example.com,team@example.com",
+        )
+        report = build_report([], settings, PERIOD_START, PERIOD_END)
+        client = _smtp_mock()
+        smtp_class.return_value = client
+        client.send_message.side_effect = [
+            smtplib.SMTPRecipientsRefused(
+                {"lead@example.com": (550, b"rejected")}
+            ),
+            {},
+        ]
+        result = send_report(report, settings)
+        self.assertEqual(result.outcome, "Success With Warnings")
+        self.assertEqual(result.accepted_count, 1)
+        self.assertEqual(result.failed_count, 1)
+        self.assertEqual(client.send_message.call_count, 2)
+
+    @patch("status_reporter.email_delivery.time.sleep")
+    @patch("status_reporter.email_delivery.smtplib.SMTP")
+    def test_temporary_smtp_recipients_refused_exception_is_retried(
+        self, smtp_class, sleep
+    ):
         settings = _settings(
             SMTP_HOST="smtp.example.com",
             SMTP_SENDER="reports@example.com",
@@ -622,9 +927,34 @@ class RenderingAndDeliveryTests(unittest.TestCase):
         report = build_report([], settings, PERIOD_START, PERIOD_END)
         client = _smtp_mock()
         smtp_class.return_value = client
-        client.send_message.return_value = {"lead@example.com": (550, b"rejected")}
-        with self.assertRaisesRegex(DeliveryError, "refused delivery"):
+        client.send_message.side_effect = [
+            smtplib.SMTPRecipientsRefused(
+                {"lead@example.com": (451, b"temporarily unavailable")}
+            ),
+            {},
+        ]
+        result = send_report(report, settings)
+        self.assertEqual(result.outcome, "Success")
+        self.assertEqual(client.send_message.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    @patch("status_reporter.email_delivery.smtplib.SMTP")
+    def test_all_recipient_rejections_fail(self, smtp_class):
+        settings = _settings(
+            SMTP_HOST="smtp.example.com",
+            SMTP_SENDER="reports@example.com",
+            SMTP_RECIPIENTS="lead@example.com,team@example.com",
+        )
+        report = build_report([], settings, PERIOD_START, PERIOD_END)
+        client = _smtp_mock()
+        smtp_class.return_value = client
+        client.send_message.side_effect = [
+            {"lead@example.com": (550, b"rejected")},
+            {"team@example.com": (550, b"rejected")},
+        ]
+        with self.assertRaisesRegex(DeliveryError, "all 2 configured"):
             send_report(report, settings)
+        self.assertEqual(client.send_message.call_count, 2)
 
     @patch("status_reporter.email_delivery.time.sleep")
     @patch("status_reporter.email_delivery.smtplib.SMTP")
@@ -661,6 +991,31 @@ class RenderingAndDeliveryTests(unittest.TestCase):
         send_report(report, settings)
         self.assertEqual(smtp_class.call_count, 2)
         sleep.assert_called_once_with(1)
+
+    @patch("status_reporter.cli.send_report")
+    def test_cli_partial_delivery_logs_warning_and_succeeds(self, send):
+        settings = {
+            "REPORT_PROJECT_NAME": "Example Project",
+            "REPORT_TIMEZONE": "UTC",
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_SENDER": "reports@example.com",
+            "SMTP_RECIPIENTS": "lead@example.com,team@example.com",
+        }
+        send.return_value = DeliveryResult("Success With Warnings", 1, 1)
+        with patch.dict(os.environ, settings, clear=True), redirect_stdout(io.StringIO()):
+            result = main(
+                [
+                    "--fixture",
+                    str(FIXTURE),
+                    "--send",
+                    "--period-start",
+                    "2026-10-19",
+                    "--period-end",
+                    "2026-10-25",
+                ]
+            )
+        self.assertEqual(result, 0)
+        send.assert_called_once()
 
 
 class CliTests(unittest.TestCase):

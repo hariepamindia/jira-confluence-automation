@@ -8,7 +8,7 @@ from typing import Any
 
 from .config import ConfigurationError, Settings, load_env_file
 from .email_delivery import DeliveryError, send_report
-from .jira import normalize_issue, fetch_issues
+from .jira import fetch_issues, normalize_issues
 from .reporting import build_report
 from .rendering import render_report, render_subject
 
@@ -30,10 +30,9 @@ def _load_fixture(path: Path, settings: Settings) -> list:
     raw_issues = payload.get("issues") if isinstance(payload, dict) else payload
     if not isinstance(raw_issues, list):
         raise ValueError("Jira fixture must be a list or an object with an issues list.")
-    return [
-        normalize_issue(issue, settings.timezone, settings.jira_story_points_field)
-        for issue in raw_issues
-    ]
+    return normalize_issues(
+        raw_issues, settings.timezone, settings.jira_story_points_field
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -115,8 +114,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(body)
         if args.send:
-            send_report(report, settings)
-            LOGGER.info("Report email sent to %s recipient(s).", len(settings.smtp_recipients))
+            delivery = send_report(report, settings)
+            if delivery.failed_count:
+                LOGGER.warning(
+                    "Report delivery outcome: %s (%s accepted, %s failed).",
+                    delivery.outcome,
+                    delivery.accepted_count,
+                    delivery.failed_count,
+                )
+            else:
+                LOGGER.info(
+                    "Report delivery outcome: %s (%s accepted).",
+                    delivery.outcome,
+                    delivery.accepted_count,
+                )
         else:
             LOGGER.info("Dry run complete; no email was sent.")
         return 0
