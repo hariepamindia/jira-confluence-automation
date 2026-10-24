@@ -9,14 +9,9 @@
         "./mcp-echo.ps1"
       ]
     },
-    "echo-windows-2": {
-      "command": "powershell",
-      "args": [
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "./mcp-echo.ps1"
-      ]
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
     }
   }
 }

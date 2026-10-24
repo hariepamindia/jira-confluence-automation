@@ -1,0 +1,1 @@
+Write-Output (Get-Date -Format o)
