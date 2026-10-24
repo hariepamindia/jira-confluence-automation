@@ -65,6 +65,149 @@ class ConfigurationTests(unittest.TestCase):
                 {"REPORT_TIMEZONE": "Not/AZone"}, require_jira=False
             )
 
+    def test_live_configuration_requires_jira_project_timezone(self):
+        values = {
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_EMAIL": "bot@example.com",
+            "JIRA_API_TOKEN": "secret",
+            "JIRA_PROJECT_KEY": "EXAMPLE",
+            "JIRA_JQL": "project = EXAMPLE",
+            "REPORT_TIMEZONE": "UTC",
+        }
+        with self.assertRaisesRegex(ConfigurationError, "JIRA_PROJECT_TIMEZONE"):
+            Settings.from_env(values)
+
+    def test_live_jira_configuration_accepts_project_scoped_settings(self):
+        settings = Settings.from_env(
+            {
+                "JIRA_BASE_URL": "https://example.atlassian.net",
+                "JIRA_EMAIL": "bot@example.com",
+                "JIRA_API_TOKEN": "test-secret",
+                "JIRA_PROJECT_KEY": "EXAMPLE",
+                "JIRA_PROJECT_TIMEZONE": "America/New_York",
+                "JIRA_JQL": "project = EXAMPLE ORDER BY updated DESC",
+            }
+        )
+        self.assertEqual(settings.jira_project_key, "EXAMPLE")
+        self.assertEqual(settings.timezone_name, "America/New_York")
+        self.assertEqual(
+            settings.jira_required_fields,
+            ("key", "summary", "status", "assignee", "duedate"),
+        )
+
+    def test_jira_scope_must_match_configured_project(self):
+        with self.assertRaisesRegex(ConfigurationError, "JIRA_JQL"):
+            Settings.from_env(
+                {
+                    "JIRA_PROJECT_KEY": "EXAMPLE",
+                    "JIRA_JQL": "project = OTHER",
+                },
+                require_jira=False,
+            )
+
+    def test_approved_status_mapping_cannot_be_overridden(self):
+        with self.assertRaisesRegex(ConfigurationError, "approved mappings"):
+            Settings.from_env(
+                {
+                    "REPORT_STATUS_MAPPINGS":
+                        "To Do=Active,In Progress=Active,Blocked=Blocked,Done=Completed"
+                },
+                require_jira=False,
+            )
+
+    def test_status_categories_drive_legacy_status_sets(self):
+        settings = Settings.from_env(
+            {
+                "REPORT_STATUS_MAPPINGS":
+                    "To Do=Planned,In Progress=Active,Blocked=Blocked,"
+                    "Done=Completed,On Hold=Active"
+            },
+            require_jira=False,
+        )
+        self.assertIn("on hold", settings.in_progress_statuses)
+        self.assertEqual(settings.done_statuses, ("done",))
+        with self.assertRaisesRegex(ConfigurationError, "REPORT_STATUS_MAPPINGS"):
+            Settings.from_env(
+                {"REPORT_DONE_STATUSES": "Done,Resolved"},
+                require_jira=False,
+            )
+
+    def test_health_thresholds_and_report_detail_limit_are_bounded(self):
+        with self.assertRaisesRegex(ConfigurationError, "thresholds"):
+            Settings.from_env(
+                {
+                    "REPORT_HEALTH_GREEN_MAX_PERCENT": "20",
+                    "REPORT_HEALTH_YELLOW_MAX_PERCENT": "10",
+                },
+                require_jira=False,
+            )
+        with self.assertRaisesRegex(ConfigurationError, "at most 100"):
+            Settings.from_env(
+                {"REPORT_DETAIL_LIMIT": "101"}, require_jira=False
+            )
+
+    def test_smtp_requires_tls_and_valid_unique_recipients(self):
+        with self.assertRaisesRegex(ConfigurationError, "requires TLS"):
+            Settings.from_env(
+                {
+                    "SMTP_HOST": "smtp.example.com",
+                    "SMTP_USE_SSL": "false",
+                    "SMTP_STARTTLS": "false",
+                },
+                require_jira=False,
+            )
+        with self.assertRaisesRegex(ConfigurationError, "not both"):
+            Settings.from_env(
+                {
+                    "SMTP_HOST": "smtp.example.com",
+                    "SMTP_USE_SSL": "true",
+                    "SMTP_STARTTLS": "true",
+                },
+                require_jira=False,
+            )
+        with self.assertRaisesRegex(ConfigurationError, "single valid email"):
+            Settings.from_env(
+                {"SMTP_RECIPIENTS": "good@example.com,not-an-email"},
+                require_jira=False,
+            )
+        with self.assertRaisesRegex(ConfigurationError, "duplicates"):
+            Settings.from_env(
+                {
+                    "SMTP_RECIPIENTS":
+                        "lead@example.com,LEAD@example.com"
+                },
+                require_jira=False,
+            )
+
+    def test_database_and_retention_settings_are_validated(self):
+        with self.assertRaisesRegex(ConfigurationError, "PostgreSQL URL"):
+            Settings.from_env(
+                {"DATABASE_URL": "https://db.example.com/reporting"},
+                require_jira=False,
+            )
+        with self.assertRaisesRegex(ConfigurationError, "at least 1"):
+            Settings.from_env(
+                {"AUDIT_RETENTION_DAYS": "0"}, require_jira=False
+            )
+        with self.assertRaisesRegex(ConfigurationError, "must be 90"):
+            Settings.from_env(
+                {"AUDIT_RETENTION_DAYS": "120"}, require_jira=False
+            )
+        with self.assertRaisesRegex(ConfigurationError, "DATABASE_URL"):
+            Settings.from_env({}, require_jira=False, require_database=True)
+
+    def test_validation_errors_do_not_echo_credentials(self):
+        secret = "never-print-this-token"
+        with self.assertRaises(ConfigurationError) as raised:
+            Settings.from_env(
+                {
+                    "JIRA_API_TOKEN": secret,
+                    "SMTP_RECIPIENTS": "not-an-email",
+                },
+                require_jira=False,
+            )
+        self.assertNotIn(secret, str(raised.exception))
+
     def test_smtp_auth_requires_username_and_password_together(self):
         with self.assertRaisesRegex(ConfigurationError, "both SMTP_USERNAME"):
             Settings.from_env(
@@ -87,6 +230,18 @@ class ConfigurationTests(unittest.TestCase):
                     "JIRA_API_TOKEN": "secret",
                     "JIRA_JQL": "project = EXAMPLE",
                 }
+            )
+
+    def test_malformed_urls_raise_actionable_configuration_errors(self):
+        with self.assertRaisesRegex(ConfigurationError, "JIRA_BASE_URL"):
+            Settings.from_env(
+                {"JIRA_BASE_URL": "https://[invalid"},
+                require_jira=False,
+            )
+        with self.assertRaisesRegex(ConfigurationError, "DATABASE_URL"):
+            Settings.from_env(
+                {"DATABASE_URL": "postgresql://[invalid/db"},
+                require_jira=False,
             )
 
     def test_env_file_does_not_override_process_environment(self):
@@ -139,6 +294,8 @@ class JiraNormalizationTests(unittest.TestCase):
             JIRA_BASE_URL="https://example.atlassian.net",
             JIRA_EMAIL="bot@example.com",
             JIRA_API_TOKEN="test-secret",
+            JIRA_PROJECT_KEY="EXAMPLE",
+            JIRA_PROJECT_TIMEZONE="UTC",
             JIRA_JQL="project = EXAMPLE",
             JIRA_PAGE_SIZE="2",
             JIRA_MAX_RETRIES="2",

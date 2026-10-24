@@ -12,11 +12,13 @@ This application reads a configured Jira Cloud search scope, calculates the week
    python -m pip install -e .
    ```
 
-2. Copy `weekly-status.env.example` to `weekly-status.env`. The latter is ignored by Git. Configure the Jira base URL, Jira account email, API token, project name, and a JQL scope that includes the current work and recently completed work needed for the report. The account needs permission to browse the selected Jira projects.
+2. Copy `weekly-status.env.example` to `weekly-status.env`. The latter is ignored by Git. Configure `JIRA_PROJECT_KEY`, `JIRA_PROJECT_TIMEZONE`, the Jira base URL, account email, API token, project name, and a JQL scope containing that project which includes current work and recently completed work. The account needs permission to browse the project.
 3. Set `JIRA_STORY_POINTS_FIELD` to the story-point custom field key used by your Jira instance, or leave it blank if story points are not used.
-4. Keep Jira and SMTP credentials in the ignored environment file or inject them from the deployment secret store. The committed example contains placeholders only.
+4. For local development, keep credentials only in the ignored environment file with restrictive filesystem permissions. In production, inject credentials through the deployment environment or secret store; do not bake them into container images or commit them. The committed example contains placeholders only.
 
-The file parser accepts one literal `KEY=VALUE` per line, ignores blank lines and full-line comments, and strips matching surrounding quotes. It does not expand variables or execute shell content. Process environment variables override values in the file.
+The file parser accepts one literal `KEY=VALUE` per line, ignores blank lines and full-line comments, and strips matching surrounding quotes. It does not expand variables or execute shell content. Process environment variables override values in the file. Live Jira runs require `JIRA_PROJECT_TIMEZONE`; `REPORT_TIMEZONE` is accepted only for offline/legacy use and cannot override the Jira project timezone.
+
+`JIRA_JQL` must explicitly scope the search to `JIRA_PROJECT_KEY`. The configuration requests Issue Key, Summary, Status, Assignee, and Due Date as required fields. Use a PostgreSQL `DATABASE_URL` for the audit/metadata integration; `AUDIT_RETENTION_DAYS` is 90. These database settings are validated here and are consumed by the persistence integration.
 
 ## Run and preview
 
@@ -26,7 +28,7 @@ Use a fictional fixture to validate the workflow without Jira access:
 python -m status_reporter --fixture tests/fixtures/weekly_issues.json --env-file weekly-status.env
 ```
 
-For a live Jira preview, omit `--fixture`. A normal run never sends email. The default reporting period is the previous Monday through Sunday, calculated in `REPORT_TIMEZONE`. To select an inclusive custom date range, pass both `--period-start YYYY-MM-DD` and `--period-end YYYY-MM-DD`. Use `--output preview.txt` to save a local report preview; store previews securely because issue summaries and assignees can be sensitive.
+For a live Jira preview, omit `--fixture`. A normal run never sends email. The default reporting period is the previous Monday through Sunday, calculated in `JIRA_PROJECT_TIMEZONE`. To select an inclusive custom date range, pass both `--period-start YYYY-MM-DD` and `--period-end YYYY-MM-DD`. Use `--output preview.txt` to save a local report preview; store previews securely because issue summaries and assignees can be sensitive.
 
 Send only after reviewing the report and configuring `SMTP_HOST`, `SMTP_PORT`, `SMTP_SENDER`, and `SMTP_RECIPIENTS`:
 
@@ -34,31 +36,27 @@ Send only after reviewing the report and configuring `SMTP_HOST`, `SMTP_PORT`, `
 python -m status_reporter --env-file weekly-status.env --send
 ```
 
-SMTP authentication is optional. If used, provide both `SMTP_USERNAME` and `SMTP_PASSWORD`. Port 587 with STARTTLS is the default; set `SMTP_USE_SSL=true` for implicit TLS (typically port 465) and `SMTP_STARTTLS=false` when appropriate. Connection failures and temporary SMTP 4xx responses receive bounded retries (`SMTP_MAX_RETRIES`); permanent errors and uncertain disconnects during message delivery fail visibly without a potentially duplicating resend.
+SMTP authentication is optional. If used, provide both `SMTP_USERNAME` and `SMTP_PASSWORD`. SMTP must use TLS: port 587 with STARTTLS is the default; for implicit TLS (typically port 465), set `SMTP_USE_SSL=true` and `SMTP_STARTTLS=false`. Enabling both or disabling both is rejected. The sender and every recipient must be a single valid email address, and duplicate recipients are rejected. Retries are bounded by `SMTP_MAX_RETRIES`.
 
 ## Report definitions and assumptions
 
-- **Open** means the Jira status is not in `REPORT_DONE_STATUSES`; done statuses default to Done, Closed, and Resolved.
-- **Completed this period** means the issue has a done status and its Jira `resolutiondate` falls within the selected dates. The configured JQL must include those completed issues.
-- **In progress** matches `REPORT_IN_PROGRESS_STATUSES`.
-- **Blocked** matches a status in `REPORT_BLOCKED_STATUSES` or a label in `REPORT_BLOCKED_LABELS`.
-- **At risk** matches a configured risk label, a configured high-priority value, or an overdue open due date.
-- **Overdue** is an open issue whose due date is earlier than the report run date. **Due soon** is an open issue due between the run date and `REPORT_DUE_SOON_DAYS`, inclusive.
+The definitions below are the approved report policy. This task validates the configuration for these rules; the follow-on metric and rendering tasks wire them into the report output.
+
+- **Status mapping** is configured in `REPORT_STATUS_MAPPINGS`; the approved mappings are To Do → Planned, In Progress → Active, Blocked → Blocked, and Done → Completed. Unmapped statuses are treated as Active and logged.
+- **Completed this period** uses Jira's resolution date. Reopened issues do not count as completed; if completed again, the latest resolution date applies. Exclude status `Cancelled` and resolution `Duplicate`.
+- **Blocked** means status Blocked or the `blocked` label.
+- **At risk** means a non-Done issue due today through the next seven calendar days. **Overdue** means a due date before today. The due-soon window is seven calendar days.
+- **Health** uses active statuses as its denominator: Green is 0–10% overdue, Yellow is over 10% through 20%, and Red is over 20%. Zero active issues is Green. The percentage boundaries are configured by `REPORT_HEALTH_GREEN_MAX_PERCENT` and `REPORT_HEALTH_YELLOW_MAX_PERCENT`.
+- **Detail cap** is `REPORT_DETAIL_LIMIT` and cannot exceed 100. When selecting details, order by priority (Highest, High, Medium, Low), earliest due date, oldest creation date, then Jira key.
 - **Milestones** are grouped from Jira fix versions. Completion is based on the done-status mapping; a past release date is Delayed, a release date within the due-soon window is At risk, and absent fix-version data is reported explicitly.
-- **Health** is Red when the blocked or overdue count reaches its configured red threshold. Otherwise it is Yellow when the at-risk count reaches its threshold or a milestone is at risk/delayed. An empty Jira result is Yellow because there is no data on which to claim Green. Otherwise health is Green.
-- Labels, status names, priorities, timezone, due-soon window, and health thresholds are configurable in the environment file. Status and label comparisons are case-insensitive.
 
-Jira query scope is configured in `JIRA_JQL`; the application retrieves the matching set and paginates all results. Narrowing the query to only issues updated during the week can omit open work, due items, and older unresolved issues, so include the project or team scope needed for current metrics as well as recently resolved issues. Milestones are limited to fix versions attached to returned issues; no milestone is invented when Jira has no corresponding data.
+Jira query scope is configured in `JIRA_JQL`; the application retrieves the matching set and paginates all results. Narrowing the query to only issues updated during the week can omit open work, due items, and older unresolved issues, so include the configured project scope and recently resolved issues. Milestones are limited to fix versions attached to returned issues; no milestone is invented when Jira has no corresponding data.
 
-## Weekly scheduling on Windows
+## Production deployment assumptions
 
-Create a Windows Task Scheduler task for Monday morning in the same timezone as `REPORT_TIMEZONE`. Set the action's program to the Python executable from the project's virtual environment (for example, `C:\path\to\project\.venv\Scripts\python.exe`), arguments to:
+The approved production target is a Docker deployment with reachable Jira and PostgreSQL, plus a Node.js cron job owned by the Project Administrator. Schedule the report for Monday at 09:00 in `JIRA_PROJECT_TIMEZONE`; recover a missed run on next startup and allow only one active run at a time. The scheduler and persistence integration are separate implementation tasks; this configuration task does not install or start them.
 
-```text
--m status_reporter --env-file weekly-status.env --send
-```
-
-Set **Start in** to the project directory. First run the same command without `--send` to review its preview and confirm the configured period and recipients. Store the environment file with restrictive filesystem permissions and disable the task or remove `--send` to stop delivery.
+The production environment must provide Docker, PostgreSQL, network access to Jira, and stable network conditions. Do not deploy a Windows Task Scheduler job as the production scheduler.
 
 ## Tests and troubleshooting
 

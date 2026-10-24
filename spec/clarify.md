@@ -35,6 +35,7 @@ Blocked: Issue contains the label blocked.
 At Risk: Issue past due date and not completed.
 
 Overdue: Current date greater than due date and status not Done.
+At Risk: Issue due within 7 days and not completed.
 - **Specify business rules.** Define status-to-category mappings, how blockers and at-risk items are identified, the due-soon window, and configurable Green/Yellow/Red thresholds, precedence, and boundary conditions. Explain how missing or contradictory signals affect health.
 Resolution: Status mappings:
 
@@ -51,6 +52,16 @@ Health thresholds:
 Green: Less than 10% overdue issues
 Yellow: 10%-20% overdue issues
 Red: More than 20% overdue issues
+Denominator: Total active issues included in the report.
+
+Boundary Rules:
+
+Green = 0% through 10% overdue issues
+Yellow = More than 10% through 20% overdue issues
+Red = More than 20% overdue issues
+Empty Data Behavior: If there are no active issues, Health = Green.
+
+Precedence: Blocked status overrides At Risk status. At Risk overrides Planned.
 - **Specify milestone calculations.** Identify the source field(s), whether Jira fix versions are authoritative, how progress percentage and target dates are derived, how multiple versions per issue are counted, and how missing, changed, or released versions are represented.
 Resolution:
 
@@ -153,3 +164,490 @@ SMTP failures are reported clearly.
 2. Decide partial-data failure behavior, report sensitivity/retention, delivery policy, and approved secret/TLS controls.
 3. Select the scheduler and deployment identity, set run time/timezone, and define monitoring and recovery ownership.
 4. Convert the decisions into explicit acceptance examples and threshold-boundary tests before production delivery.
+T01 Final Decision Record
+Required Fields and Invalid Records
+Resolution:
+
+Required fields:
+
+Issue Key
+Summary
+Status
+Assignee
+Due Date
+If any required field is missing:
+
+The issue is excluded from the report.
+A validation warning is logged.
+The report generation continues.
+This overrides the constitution wording for the prototype.
+
+Unassigned issues:
+
+Excluded from reporting.
+Issues without Due Dates:
+
+Excluded from reporting.
+At-Risk Definition
+Resolution:
+
+At Risk:
+
+Due date is within 7 calendar days
+Status is not Done
+Past-due issues are classified as Overdue, not At Risk.
+
+This is the only authoritative definition.
+
+Blocked Definition
+Resolution:
+
+Blocked:
+
+Issue status = Blocked
+OR
+
+Issue contains the label "blocked"
+Either condition qualifies as Blocked.
+
+Completion-In-Period Semantics
+Resolution:
+
+Completion Date:
+
+Jira Resolution Date
+Completed During Reporting Period:
+
+Resolution Date falls between the reporting period start and end.
+Reopened Issues:
+
+Excluded from completed counts once reopened.
+Timezone and DST
+Resolution:
+
+Authoritative timezone:
+
+Jira Project Timezone
+Daylight Saving Time:
+
+Determined exclusively from the Jira Project Timezone.
+The Jira Instance Timezone is ignored.
+
+Partial Email Delivery
+Resolution:
+
+If one recipient fails:
+
+Continue sending to remaining recipients.
+Mark run status as Success With Warnings.
+Log failed recipients.
+Partial recipient failures do not fail the run.
+
+Audit Logging
+Resolution:
+
+Audit log required.
+
+Audit log contents:
+
+Run timestamp
+Reporting period
+Recipient list
+Delivery result
+Error messages
+Retention:
+
+90 days
+Storage:
+
+Application log storage
+Failure to write audit logs causes the run to fail.
+
+Priority Ordering
+Resolution:
+
+Priority ranking:
+
+Highest
+High
+Medium
+Low
+Tie-breaker:
+
+Earliest Due Date
+Then oldest creation date
+Scheduling and Ownership
+Resolution:
+
+Schedule:
+
+Every Monday at 09:00
+Deployment Target:
+
+Docker container
+Owner:
+
+Project Administrator
+Missed Runs:
+
+Execute immediately on next startup.
+Overlapping Runs:
+
+Not allowed.
+Existing run must complete first.
+Performance Conditions
+Resolution:
+
+60-second requirement includes:
+
+Jira API calls
+Pagination
+Email delivery
+Database operations
+Maximum scope:
+
+100 issues processed per run.
+The report may display fewer than 100 issues if prioritization is applied.
+
+Scope and Query Completeness
+Resolution:
+
+The query must include:
+
+Current unresolved issues
+Issues resolved during the reporting period
+Canceled Issues:
+
+Status = Cancelled
+Duplicate Issues:
+
+Resolution = Duplicate
+Excluded from metrics and reporting.
+
+Approval
+Approved By: Project Owner
+
+Approval Date: Module 17 Prototype Review
+
+Status: Approved for implementation.
+T01 Final Boundary Decisions
+Field Validation
+Malformed Values:
+
+Missing required fields:
+
+Exclude issue from reporting.
+Log validation warning.
+Continue processing.
+Malformed values:
+
+Exclude issue from reporting.
+Log validation warning.
+Continue processing.
+Prototype Exception:
+
+For this prototype, validation warnings do not fail the report run.
+
+Active Issue Definition
+Active Issues:
+
+To Do
+In Progress
+Blocked
+Completed Issues:
+
+Done
+Unmapped Statuses:
+
+Treated as Active.
+Included in denominator.
+Logged as unmapped status.
+At Risk Boundary Rules
+At Risk:
+
+Due date is today through seven calendar days in the future.
+Status is not Done.
+Examples:
+
+Due today → At Risk
+Due in 7 days → At Risk
+Due in 8 days → Not At Risk
+Past due yesterday → Overdue
+Reopened Issues
+Reopened Issues:
+
+Reopened issues are removed from completed counts.
+If completed again later:
+Count using the latest Resolution Date.
+Include only if the latest Resolution Date falls within the reporting period.
+Priority Ordering
+Priority Order:
+
+Highest
+High
+Medium
+Low
+Tie-breakers:
+
+Earliest Due Date
+Oldest Creation Date
+Lowest Jira Issue Key
+Issue Volume Policy
+Maximum Processing Volume:
+
+Unlimited issue retrieval through Jira pagination.
+Maximum Detailed Report Listing:
+
+100 issues.
+If more than 100 issues exist:
+
+Process all issues.
+Calculate metrics from all issues.
+Report details limited to the highest-priority 100 issues.
+Audit Access Controls
+Audit Access:
+
+Project Administrator only.
+Stored Fields:
+
+Timestamp
+Reporting period
+Recipient count
+Delivery result
+Error summary
+Not Stored:
+
+Email content
+API tokens
+Secrets
+Passwords
+Retention:
+
+90 days
+Scheduler Definition
+Scheduler:
+
+Docker scheduled task.
+Runs every Monday at 09:00 Jira Project Timezone.
+Missed Run:
+
+Execute once at next startup.
+Overlap Prevention:
+
+New run cannot start while a previous run is active.
+Performance Test Conditions
+Performance Target:
+
+Process 100 issues in under 60 seconds.
+Measurement Includes:
+
+Jira API retrieval
+Pagination
+Database operations
+Report generation
+Email delivery
+Measurement Excludes:
+
+Manual user approval time
+Test Environment:
+
+Docker deployment
+PostgreSQL running
+Jira API reachable
+Approval Test Cases
+At Risk Example:
+
+Due in 7 days → At Risk
+Due in 8 days → Not At Risk
+Health Example:
+
+0 active issues → Green
+10 overdue of 100 active → Green
+11 overdue of 100 active → Yellow
+20 overdue of 100 active → Yellow
+21 overdue of 100 active → Red
+Partial Delivery Example:
+
+4 recipients succeed
+1 recipient fails
+Result:
+
+Success With Warnings
+
+Approved By: Project Owner
+
+Status: Approved for Implementation
+T01 Final Reconciliation and Test Cases
+Constitution Exception
+Prototype Exception:
+
+The constitution's fail-on-incomplete-data rule is modified for the prototype.
+
+Missing or malformed required fields:
+
+Exclude the issue from reporting.
+Record validation warnings.
+Continue processing other issues.
+This exception is approved by the Project Owner and applies only to the prototype.
+
+Reporting Period Boundaries
+Reporting Period:
+
+Start: Monday 00:00:00 (Jira Project Timezone)
+
+End: Sunday 23:59:59 (Jira Project Timezone)
+
+Examples:
+
+Monday 00:00:00 → Included
+Sunday 23:59:59 → Included
+Sunday 23:59:58 → Included
+Next Monday 00:00:00 → Excluded
+Priority Ordering Examples
+Example A:
+
+Issue A: Priority = High Due Date = Jan 1
+
+Issue B: Priority = High Due Date = Jan 5
+
+Result: Issue A ranked before Issue B.
+
+Example B:
+
+Issue A: Priority = High Due Date = Jan 1 Created = Jan 1
+
+Issue B: Priority = High Due Date = Jan 1 Created = Jan 5
+
+Result: Issue A ranked before Issue B.
+
+Example C:
+
+Priority, Due Date and Creation Date identical
+
+Result: Lowest Jira Issue Key wins.
+
+PostgreSQL Usage
+PostgreSQL stores:
+
+Report execution history
+Generated report metadata
+Audit metadata
+Audit logs remain in application logs.
+
+Database operations included in performance testing:
+
+Report metadata writes
+Report execution history writes
+Performance Test Procedure
+Test Environment:
+
+Docker deployment
+PostgreSQL running
+Jira API available
+Network Assumption:
+
+Stable network connection
+No artificial throttling
+Procedure:
+
+Query Jira
+Process 100 issues
+Generate report
+Store metadata
+Send email
+Pass Criteria:
+
+Complete in under 60 seconds.
+
+Scheduler Implementation
+Scheduler Mechanism:
+
+Node.js scheduled job using cron scheduling.
+
+Execution:
+
+Every Monday at 09:00 using Jira Project Timezone.
+
+Missed Run:
+
+Execute on next startup.
+
+Overlap Protection:
+
+Only one active run allowed.
+
+Audit Field Reconciliation
+Superseding Decision:
+
+Recipient Count replaces Recipient List.
+
+Stored:
+
+Recipient Count
+Not Stored:
+
+Recipient email addresses
+Reason:
+
+Reduce exposure of personal information.
+
+Status Mapping Completion
+Final Status Mapping (Authoritative)
+
+This mapping supersedes all previous mappings.
+
+To Do -> Planned
+In Progress -> Active
+Blocked -> Blocked
+Done -> Completed
+
+Denominator Membership:
+
+Planned -> Included
+Active -> Included
+Blocked -> Included
+Completed -> Excluded
+
+Unmapped Statuses:
+
+Treated as Active
+Included in denominator
+Logged as warning
+
+Precedence:
+
+1. Blocked
+2. At Risk
+3. Active
+4. Planned
+5. Completed
+
+Examples:
+
+Status = Blocked
+Result = Blocked
+
+Status = In Progress and due in 5 days
+Result = At Risk
+
+Status = In Progress and due in 30 days
+Result = Active
+
+Status = To Do
+Result = Planned
+
+Status = Done
+Result = Completed
+Reopened Issue Example
+Issue completed on Wednesday: Counted as completed.
+
+Issue reopened on Thursday: Removed from completed count.
+
+Issue completed again on Saturday: Counted using Saturday Resolution Date.
+
+Approval
+Approved By: Project Owner
+
+Status: Final Approval Granted
+
+Implementation Authorized.
